@@ -6,6 +6,7 @@ const BLOOD_TYPES = ['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-'];
 
 export default function MedicalIDModal({ isOpen, onClose }) {
   const [form, setForm] = useState({
+    userName: '',
     bloodType: '',
     allergies: '',
     emergencyContact: '',
@@ -88,6 +89,22 @@ export default function MedicalIDModal({ isOpen, onClose }) {
             <p className="text-xs text-gray-400">
               This info is stored offline on your device to assist paramedics.
             </p>
+
+            {/* User Name */}
+            <div>
+              <label className="text-[11px] font-bold uppercase tracking-wider text-gray-400 mb-2 block">
+                Your Full Name
+              </label>
+              <input
+                type="text"
+                value={form.userName}
+                onChange={(e) => handleChange('userName', e.target.value)}
+                placeholder="e.g. John Doe"
+                className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-2.5
+                  text-sm text-gray-200 placeholder-gray-600
+                  focus:outline-none focus:border-red-500/40 transition-colors"
+              />
+            </div>
 
             {/* Blood Type */}
             <div>

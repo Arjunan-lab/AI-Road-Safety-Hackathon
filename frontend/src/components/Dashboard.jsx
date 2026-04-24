@@ -619,7 +619,7 @@ export default function Dashboard() {
             </div>
           </div>
           <div className="flex flex-col">
-            <h2 className="font-tactical text-2xl text-white">{medicalId?.emergencyName || 'UNREGISTERED'}</h2>
+            <h2 className="font-tactical text-2xl text-white">{medicalId?.userName || 'UNREGISTERED'}</h2>
             <span className="font-mono text-[11px] text-bio-green flex items-center gap-1 mb-1">
               <i className="ph-fill ph-check-circle"></i> ID VERIFIED (LOCAL)
             </span>

@@ -6,6 +6,7 @@
 const MEDICAL_ID_KEY = 'roadsos_medical_id';
 
 const DEFAULT_MEDICAL_ID = {
+  userName: '',
   bloodType: '',
   allergies: '',
   emergencyContact: '',
