@@ -314,15 +314,31 @@ export default function Dashboard() {
       const result = mapped.length > 0 ? mapped : FALLBACK_HOSPITALS;
       setRealHospitals(result);
       setHospitalSource('live');
-      localStorage.setItem(HOSPITAL_CACHE_KEY, JSON.stringify(result));
+      localStorage.setItem(HOSPITAL_CACHE_KEY, JSON.stringify({
+        originLat: lat,
+        originLng: lng,
+        timestamp: Date.now(),
+        data: result
+      }));
       console.log(`[Hospitals] ✅ ${result.length} results from Render backend.`);
 
     } catch (err) {
       console.warn('[Hospitals] ⚠️ Fetch failed:', err.message);
       try {
-        const cached = localStorage.getItem(HOSPITAL_CACHE_KEY);
-        if (cached) {
-          setRealHospitals(JSON.parse(cached));
+        const cachedStr = localStorage.getItem(HOSPITAL_CACHE_KEY);
+        if (cachedStr) {
+          const parsed = JSON.parse(cachedStr);
+          const cachedHospitals = Array.isArray(parsed) ? parsed : parsed.data;
+          
+          if (!Array.isArray(parsed) && parsed.originLat && parsed.originLng && validCoords) {
+             const distFromCache = haversineKm(lat, lng, parsed.originLat, parsed.originLng);
+             if (distFromCache > 20) {
+                 console.warn('[Hospitals] 🗑️ Cache invalidated (Stale Geography: >20km away).');
+                 throw new Error('Stale Geography'); // force fallback
+             }
+          }
+          
+          setRealHospitals(cachedHospitals);
           setHospitalSource('cached');
           console.log('[Hospitals] 📦 Loaded from cache.');
           return;
