@@ -313,14 +313,19 @@ export default function Dashboard() {
 
       const result = mapped.length > 0 ? mapped : FALLBACK_HOSPITALS;
       setRealHospitals(result);
-      setHospitalSource('live');
-      localStorage.setItem(HOSPITAL_CACHE_KEY, JSON.stringify({
-        originLat: lat,
-        originLng: lng,
-        timestamp: Date.now(),
-        data: result
-      }));
-      console.log(`[Hospitals] ✅ ${result.length} results from Render backend.`);
+      setHospitalSource(data.source === 'fallback' ? 'offline' : 'live');
+      
+      if (data.source !== 'fallback') {
+          localStorage.setItem(HOSPITAL_CACHE_KEY, JSON.stringify({
+            originLat: lat,
+            originLng: lng,
+            timestamp: Date.now(),
+            data: result
+          }));
+          console.log(`[Hospitals] ✅ ${result.length} results from Render backend.`);
+      } else {
+          console.log(`[Hospitals] ⚠️ Backend returned fallback data.`);
+      }
 
     } catch (err) {
       console.warn('[Hospitals] ⚠️ Fetch failed:', err.message);
