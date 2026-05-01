@@ -295,36 +295,51 @@ export default function Dashboard() {
       if (!navigator.onLine) throw new Error('offline');
       if (!validCoords) throw new Error('invalid_coords');
 
-      // Uses Render backend to bypass Overpass strict CORS/406 blocks
-      const data = await fetchHospitals(lat, lng, 10000);
+      // Query Overpass directly from the client to avoid Render/AWS IP blocks & cold starts
+      const query = `[out:json][timeout:15];(node["amenity"="hospital"](around:10000,${lat},${lng});way["amenity"="hospital"](around:10000,${lat},${lng});relation["amenity"="hospital"](around:10000,${lat},${lng}););out center body;`;
       
-      const mapped = (data.hospitals || []).map(el => {
-        const distKm = validCoords ? haversineKm(lat, lng, el.lat, el.lng) : null;
+      const res = await fetch('https://overpass-api.de/api/interpreter', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ data: query }),
+        signal: AbortSignal.timeout(15000)
+      });
+      
+      if (!res.ok) throw new Error(`Overpass API Error: ${res.status}`);
+      const json = await res.json();
+      
+      const mapped = (json.elements || []).map(el => {
+        const h_lat = el.lat || el.center?.lat;
+        const h_lng = el.lon || el.center?.lon;
+        const distKm = (validCoords && h_lat && h_lng) ? haversineKm(lat, lng, h_lat, h_lng) : null;
+        
         return {
-          name:   el.name || 'Unnamed Medical Facility',
-          type:   el.type ? el.type.toUpperCase() : 'HOSPITAL',
-          phone:  el.phone || '',
-          lat:    el.lat,
-          lng:    el.lng,
-          dist:   distKm !== null ? `${distKm.toFixed(1)} km` : (el.distance || 'Nearby'),
-          distKm: distKm !== null ? distKm : parseFloat(el.distance) || 999,
+          name:   el.tags?.name || el.tags?.['name:en'] || 'Unnamed Medical Facility',
+          type:   (el.tags?.['operator:type'] || el.tags?.healthcare || 'HOSPITAL').toUpperCase(),
+          phone:  el.tags?.phone || el.tags?.['contact:phone'] || '',
+          lat:    h_lat,
+          lng:    h_lng,
+          dist:   distKm !== null ? `${distKm.toFixed(1)} km` : 'Nearby',
+          distKm: distKm !== null ? distKm : 999,
         };
-      }).sort((a, b) => a.distKm - b.distKm);
+      }).filter(h => h.lat && h.lng).sort((a, b) => a.distKm - b.distKm);
 
       const result = mapped.length > 0 ? mapped : FALLBACK_HOSPITALS;
+      const isFallback = mapped.length === 0;
+
       setRealHospitals(result);
-      setHospitalSource(data.source === 'fallback' ? 'offline' : 'live');
+      setHospitalSource(isFallback ? 'offline' : 'live');
       
-      if (data.source !== 'fallback') {
+      if (!isFallback) {
           localStorage.setItem(HOSPITAL_CACHE_KEY, JSON.stringify({
             originLat: lat,
             originLng: lng,
             timestamp: Date.now(),
             data: result
           }));
-          console.log(`[Hospitals] ✅ ${result.length} results from Render backend.`);
+          console.log(`[Hospitals] ✅ ${result.length} results directly from Overpass.`);
       } else {
-          console.log(`[Hospitals] ⚠️ Backend returned fallback data.`);
+          console.log(`[Hospitals] ⚠️ Overpass returned 0 results, using fallback data.`);
       }
 
     } catch (err) {
