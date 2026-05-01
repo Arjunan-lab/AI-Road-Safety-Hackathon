@@ -65,13 +65,8 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-    ],
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -530,4 +525,10 @@ async def zero_touch_whatsapp_dispatch(req: WhatsAppDispatchRequest):
     logger.info("[Twilio] ℹ️ No credentials — instructing client to use wa.me fallback")
     return {"delivered": False, "method": "fallback"}
 
-# Force reload
+# ─── Production Entry Point ──────────────────────────────────────────────────
+# Render.com starts the server using: uvicorn main:app --host 0.0.0.0 --port $PORT
+# The block below allows `python main.py` to also work during local testing.
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.getenv("PORT", "8000"))
+    uvicorn.run("main:app", host="0.0.0.0", port=port)

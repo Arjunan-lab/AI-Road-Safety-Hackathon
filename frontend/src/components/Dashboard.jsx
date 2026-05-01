@@ -206,7 +206,7 @@ export default function Dashboard() {
     console.log('[Dispatch] Attempting Twilio zero-touch dispatch to:', contact);
 
     try {
-      const res = await fetch('/api/dispatch-whatsapp', {
+      const res = await fetch('https://roadsos-backend.onrender.com/dispatch-whatsapp', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

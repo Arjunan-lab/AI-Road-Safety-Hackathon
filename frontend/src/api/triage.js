@@ -9,7 +9,7 @@
  * All Ollama queries are LOCAL — no cloud API keys or internet required.
  */
 
-const API_BASE = 'http://127.0.0.1:8000';
+const API_BASE = 'https://roadsos-backend.onrender.com';
 
 const OFFLINE_DICTIONARY = {
   bleed: {

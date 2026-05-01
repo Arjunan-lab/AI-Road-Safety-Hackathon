@@ -3,7 +3,7 @@
  * which queries OpenStreetMap Overpass API.
  */
 
-const API_BASE = '/api';
+const API_BASE = 'https://roadsos-backend.onrender.com';
 
 /**
  * Fetches real hospitals near the given coordinates.
