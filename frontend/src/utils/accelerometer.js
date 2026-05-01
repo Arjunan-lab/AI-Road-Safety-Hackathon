@@ -3,7 +3,9 @@
  * 3-gate crash detection pipeline:
  *   Gate 1: Velocity Gate — GPS speed must be ≥ 15 km/h
  *   Gate 2: G-Force Threshold — impact must exceed 4G
- *   Gate 3: Silence Check — 2s post-spike stillness verification
+ *   Gate 3: Silence Check — 10s post-spike stillness verification
+ *
+ * DEMO MODE: Tap logo 5× to unlock. Lowers gates for stage presentation.
  */
 
 import { getLastKnownSpeed } from './geolocation';
@@ -15,9 +17,19 @@ let crashCooldown = false;
 let silenceCheckTimer = null;
 let postSpikeReadings = [];
 
+// ─── Demo Mode ───────────────────────────────────
+let _demoMode = false;
+export function setDemoMode(active) {
+  _demoMode = active;
+  console.log(`[Accelerometer] Demo Mode ${active ? '🔴 ACTIVE — gates lowered for stage demo' : '🟢 DEACTIVATED — production gates restored'}`);
+}
+export function getDemoMode() { return _demoMode; }
+
 // ─── Configuration ───────────────────────────────
-const CRASH_THRESHOLD_G = 4.0;         // G-forces for crash (~39.2 m/s²)
-const MIN_SPEED_MS = 4.17;             // 15 km/h in m/s — velocity gate
+const CRASH_THRESHOLD_G = 4.0;         // G-forces for crash — production
+const MIN_SPEED_MS = 4.17;             // 15 km/h in m/s — production velocity gate
+const DEMO_CRASH_THRESHOLD_G = 2.5;   // Demo mode: triggers from palm slam
+const DEMO_MIN_SPEED_MS = 0;           // Demo mode: no speed required
 const CRASH_COOLDOWN_MS = 10000;       // 10s cooldown between alerts
 const SILENCE_CHECK_MS = 10000;        // 10s post-spike stillness window
 const SILENCE_MAX_G = 1.5;             // Max G during silence (normal = ~1G)
@@ -75,20 +87,23 @@ function handleMotionEvent(event) {
   if (crashCallback && !crashCooldown) {
     const impactG = Math.abs(gForce - 1.0);
 
-    // GATE 1: Velocity Gate — must be moving ≥ 15 km/h
+    // Select active thresholds based on demo mode
+    const activeMinSpeed = _demoMode ? DEMO_MIN_SPEED_MS : MIN_SPEED_MS;
+    const activeCrashG = _demoMode ? DEMO_CRASH_THRESHOLD_G : CRASH_THRESHOLD_G;
+
+    // GATE 1: Velocity Gate
     const speed = getLastKnownSpeed();
-    if (speed < MIN_SPEED_MS) {
-      // Stationary or walking — ignore spike (likely a phone drop)
-      if (impactG >= CRASH_THRESHOLD_G) {
+    if (speed < activeMinSpeed) {
+      if (impactG >= activeCrashG) {
         console.log(
-          `[Accelerometer] Spike filtered: ${impactG.toFixed(1)}G at ${(speed * 3.6).toFixed(0)} km/h (below ${(MIN_SPEED_MS * 3.6).toFixed(0)} km/h threshold)`
+          `[Accelerometer] Spike filtered: ${impactG.toFixed(1)}G at ${(speed * 3.6).toFixed(0)} km/h (below ${(activeMinSpeed * 3.6).toFixed(0)} km/h threshold)`
         );
       }
       return;
     }
 
     // GATE 2: G-Force Threshold
-    if (impactG < CRASH_THRESHOLD_G) {
+    if (impactG < activeCrashG) {
       return; // Below crash threshold
     }
 

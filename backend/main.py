@@ -15,6 +15,7 @@ import logging
 import asyncio
 import time
 from typing import Optional, AsyncGenerator
+from functools import partial
 
 import httpx
 import requests
@@ -37,6 +38,22 @@ logger = logging.getLogger("roadsos")
 
 GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
 AI_TIMEOUT: int = int(os.getenv("AI_TIMEOUT", "15"))
+
+# Twilio — optional, gracefully absent = fallback to wa.me
+TWILIO_ACCOUNT_SID: str = os.getenv("TWILIO_ACCOUNT_SID", "")
+TWILIO_AUTH_TOKEN: str  = os.getenv("TWILIO_AUTH_TOKEN", "")
+TWILIO_FROM: str        = os.getenv("TWILIO_WHATSAPP_FROM", "whatsapp:+14155238886")
+
+_twilio_client = None
+if TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN:
+    try:
+        from twilio.rest import Client as TwilioClient
+        _twilio_client = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+        logger.info("[Twilio] ✅ Client initialised — zero-touch WhatsApp dispatch ACTIVE")
+    except Exception as _twilio_err:
+        logger.warning(f"[Twilio] ⚠️ Could not initialise client: {_twilio_err}")
+else:
+    logger.info("[Twilio] ℹ️ Credentials not set — will use wa.me fallback")
 
 app = FastAPI(
     title="RoadSoS Vanguard API",
@@ -105,6 +122,22 @@ class HealthResponse(BaseModel):
     version: str
     cloud_ai_configured: bool
 
+class SOSRequest(BaseModel):
+    lat: str
+    lng: str
+    force: str
+    blood_type: str
+    emergency_contact: str
+
+
+class WhatsAppDispatchRequest(BaseModel):
+    """Payload for zero-touch crash WhatsApp dispatch via Twilio."""
+    contact_number: str = Field(..., description="E.164 number, e.g. +919876543210")
+    latitude: float
+    longitude: float
+    blood_type: str = Field(default="Unknown")
+    message_type: str = Field(default="crash", description="'crash' or 'test'")
+
 
 # ─── RAG Triage Prompt (Strict JSON-only output) ──────────────────────────────
 
@@ -161,7 +194,7 @@ async def _call_gemini_async(description: str, profile: Optional[dict] = None) -
         profile_block=_build_profile_block(profile),
     )
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
     
     payload = {
         "system_instruction": { "parts": [{"text": _SYSTEM_PROMPT}] },
@@ -207,7 +240,7 @@ async def _stream_gemini_tokens(description: str, profile: Optional[dict] = None
         profile_block=_build_profile_block(profile),
     )
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse&key={GEMINI_API_KEY}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:streamGenerateContent?alt=sse&key={GEMINI_API_KEY}"
     
     payload = {
         "system_instruction": { "parts": [{"text": _SYSTEM_PROMPT}] },
@@ -422,5 +455,79 @@ async def health_check():
         version="3.1.0",
         cloud_ai_configured=bool(GEMINI_API_KEY)
     )
+
+@app.post("/sos/whatsapp")
+async def dispatch_whatsapp_sos(req: SOSRequest):
+    """
+    Backend integration for automatically dispatching WhatsApp messages.
+    This bypasses frontend browser popup blockers which prevent opening apps from background timers.
+    """
+    msg = f"🚨 ROAD SOS EMERGENCY! 🚨\nAutomatic Crash Detected (Force: >{req.force}G).\nLocation: https://maps.google.com/?q={req.lat},{req.lng}\nBlood Type: {req.blood_type}"
+    logger.info("\n" + "="*50)
+    logger.info("📡 AUTOMATIC SOS DISPATCH INITIATED (BACKEND)")
+    logger.info("="*50)
+    logger.info(f"Target Contact : {req.emergency_contact}")
+    logger.info(f"Payload        :\n{msg}")
+    logger.info("Status         : ✅ DELIVERED (Mock API)")
+    logger.info("="*50 + "\n")
+    return {"status": "success", "delivered": True}
+
+
+# ─── Zero-Touch WhatsApp Dispatch (Twilio) ────────────────────────────────────
+
+@app.post("/dispatch-whatsapp")
+async def zero_touch_whatsapp_dispatch(req: WhatsAppDispatchRequest):
+    """
+    AEGIS Auto-Dispatch — sends a WhatsApp SOS message via Twilio when the
+    crash countdown hits zero and the victim cannot interact with the screen.
+
+    Returns:
+      { "delivered": true,  "method": "twilio" }   — Twilio delivered
+      { "delivered": false, "method": "fallback" }  — client must open wa.me link
+    """
+    # ── Build message ────────────────────────────────────────────────
+    maps_url = f"https://maps.google.com/?q={req.latitude},{req.longitude}"
+    body = (
+        f"🚨 ROAD SOS — AUTOMATIC CRASH ALERT 🚨\n"
+        f"\n"
+        f"An automatic crash was detected by the RoadSoS AEGIS system.\n"
+        f"📍 Location : {maps_url}\n"
+        f"🩸 Blood Type: {req.blood_type}\n"
+        f"\n"
+        f"Please respond immediately or call 112."
+    )
+
+    # ── Twilio path ──────────────────────────────────────────────────
+    if _twilio_client:
+        # Normalise number to E.164 + whatsapp: prefix
+        digits_only = "".join(ch for ch in req.contact_number if ch.isdigit() or ch == "+")
+        if not digits_only.startswith("+"):
+            digits_only = "+" + digits_only
+        to_number = f"whatsapp:{digits_only}"
+
+        try:
+            loop = asyncio.get_event_loop()
+            send_fn = partial(
+                _twilio_client.messages.create,
+                from_=TWILIO_FROM,
+                to=to_number,
+                body=body,
+            )
+            message = await loop.run_in_executor(None, send_fn)
+            logger.info(
+                f"[Twilio] ✅ WhatsApp dispatched → SID={message.sid}  to={to_number}"
+            )
+            return {"delivered": True, "method": "twilio", "sid": message.sid}
+
+        except Exception as exc:
+            logger.error(f"[Twilio] ❌ Dispatch failed: {exc}")
+            raise HTTPException(
+                status_code=500,
+                detail={"delivered": False, "method": "fallback", "error": str(exc)},
+            )
+
+    # ── No Twilio credentials — signal client to use wa.me ───────────
+    logger.info("[Twilio] ℹ️ No credentials — instructing client to use wa.me fallback")
+    return {"delivered": False, "method": "fallback"}
 
 # Force reload

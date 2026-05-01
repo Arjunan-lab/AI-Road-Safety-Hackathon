@@ -1,6 +1,7 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { getMedicalId, saveMedicalId } from '../utils/medicalId';
 import { QRCodeSVG } from 'qrcode.react';
+import html2canvas from 'html2canvas';
 
 const BLOOD_TYPES = ['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-'];
 
@@ -13,7 +14,9 @@ export default function MedicalIDModal({ isOpen, onClose }) {
     emergencyName: '',
   });
   const [saved, setSaved] = useState(false);
-  const [showQR, setShowQR] = useState(false); // Toggle for Good Samaritan QR Generator
+  const [showQR, setShowQR] = useState(false);
+  const [isDownloading, setIsDownloading] = useState(false);
+  const wallpaperRef = useRef(null);
 
   useEffect(() => {
     if (isOpen) {
@@ -30,9 +33,29 @@ export default function MedicalIDModal({ isOpen, onClose }) {
   const handleSave = () => {
     saveMedicalId(form);
     setSaved(true);
-    setTimeout(() => {
-      setSaved(false);
-    }, 2000);
+    setTimeout(() => { setSaved(false); }, 2000);
+  };
+
+  const downloadWallpaper = async () => {
+    if (!wallpaperRef.current) return;
+    setIsDownloading(true);
+    try {
+      const canvas = await html2canvas(wallpaperRef.current, {
+        backgroundColor: '#0a0e17',
+        scale: 3,       // 3× for retina sharpness
+        useCORS: true,
+        logging: false,
+      });
+      const link = document.createElement('a');
+      link.download = `RoadSoS-LockScreen-${form.userName || 'ID'}.png`;
+      link.href = canvas.toDataURL('image/png');
+      link.click();
+    } catch (err) {
+      console.error('Wallpaper generation failed:', err);
+      alert('Could not generate image. Try again.');
+    } finally {
+      setIsDownloading(false);
+    }
   };
 
   if (!isOpen) return null;
@@ -211,28 +234,93 @@ export default function MedicalIDModal({ isOpen, onClose }) {
             </button>
           </div>
         ) : (
-          <div className="space-y-6 flex flex-col items-center justify-center animate-fade-in-up py-4">
-            <div className="text-center space-y-2">
-              <h3 className="text-sm font-bold text-white uppercase tracking-widest">Good Samaritan Sticker</h3>
-              <p className="text-xs text-gray-400 leading-relaxed px-4">
-                Print this QR code and place it on your helmet or vehicle. If you're unconscious, bystanders can scan it to instantly view your Medical ID and get AI first-aid.
+          /* ─── LOCK-SCREEN WALLPAPER GENERATOR ─── */
+          <div className="space-y-5 flex flex-col items-center animate-fade-in-up">
+            <div className="text-center">
+              <h3 className="text-sm font-bold text-white uppercase tracking-widest">Lock-Screen Wallpaper</h3>
+              <p className="text-[11px] text-gray-400 mt-1 leading-relaxed px-2">
+                Save this as your phone wallpaper. Paramedics scan the QR to access your Medical ID instantly — no unlock needed.
               </p>
             </div>
-            
-            <div className="bg-white p-4 rounded-3xl shadow-xl shadow-white/5">
-              <QRCodeSVG 
-                value={qrUrl.toString()} 
-                size={200}
-                bgColor={"#ffffff"}
-                fgColor={"#000000"}
-                level={"H"}
-                includeMargin={false}
-              />
+
+            {/* ── Wallpaper Preview Card (9:19.5 phone ratio) ── */}
+            <div
+              ref={wallpaperRef}
+              style={{ width: 270, height: 585, background: '#0a0e17', position: 'relative', overflow: 'hidden', fontFamily: 'monospace' }}
+              className="rounded-3xl border border-red-500/30 shadow-2xl shadow-red-500/20 flex-shrink-0 flex flex-col"
+            >
+              {/* Subtle grid bg */}
+              <div style={{ position: 'absolute', inset: 0, backgroundImage: 'linear-gradient(rgba(255,255,255,0.03) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.03) 1px, transparent 1px)', backgroundSize: '20px 20px' }} />
+              {/* Red glow orb */}
+              <div style={{ position: 'absolute', top: '30%', left: '50%', transform: 'translate(-50%,-50%)', width: 200, height: 200, background: 'radial-gradient(circle, rgba(225,29,72,0.18) 0%, transparent 70%)', borderRadius: '50%' }} />
+
+              {/* Top label */}
+              <div style={{ padding: '28px 20px 0', zIndex: 1 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+                  <div style={{ width: 8, height: 8, borderRadius: '50%', background: '#e11d48' }} />
+                  <span style={{ color: '#e11d48', fontSize: 9, fontWeight: 700, letterSpacing: '0.25em' }}>ROAD SOS — MEDICAL ID</span>
+                </div>
+                <div style={{ width: '100%', height: 1, background: 'rgba(225,29,72,0.3)' }} />
+              </div>
+
+              {/* Blood Type — BIG */}
+              <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 12, padding: '0 20px', zIndex: 1 }}>
+                <div style={{ textAlign: 'center' }}>
+                  <div style={{ color: 'rgba(255,255,255,0.4)', fontSize: 9, letterSpacing: '0.3em', fontWeight: 700, marginBottom: 4 }}>BLOOD TYPE</div>
+                  <div style={{ color: '#ffffff', fontSize: 72, fontWeight: 900, lineHeight: 1, letterSpacing: '-0.02em', textShadow: '0 0 30px rgba(225,29,72,0.7)' }}>
+                    {form.bloodType || 'N/A'}
+                  </div>
+                </div>
+
+                <div style={{ width: '100%', height: 1, background: 'rgba(255,255,255,0.08)' }} />
+
+                {form.allergies && (
+                  <div style={{ width: '100%' }}>
+                    <div style={{ color: 'rgba(255,255,255,0.4)', fontSize: 8, letterSpacing: '0.25em', marginBottom: 4 }}>⚠ ALLERGIES</div>
+                    <div style={{ color: '#f97316', fontSize: 13, fontWeight: 600 }}>{form.allergies}</div>
+                  </div>
+                )}
+
+                {form.emergencyName && (
+                  <div style={{ width: '100%' }}>
+                    <div style={{ color: 'rgba(255,255,255,0.4)', fontSize: 8, letterSpacing: '0.25em', marginBottom: 4 }}>EMERGENCY CONTACT</div>
+                    <div style={{ color: '#ffffff', fontSize: 13, fontWeight: 700 }}>{form.emergencyName}</div>
+                    <div style={{ color: 'rgba(255,255,255,0.5)', fontSize: 11 }}>{form.emergencyContact}</div>
+                  </div>
+                )}
+              </div>
+
+              {/* QR Code block at bottom */}
+              <div style={{ padding: '0 20px 24px', zIndex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8 }}>
+                <div style={{ width: '100%', height: 1, background: 'rgba(255,255,255,0.08)', marginBottom: 8 }} />
+                <div style={{ background: '#fff', padding: 10, borderRadius: 12 }}>
+                  <QRCodeSVG value={qrUrl.toString()} size={100} bgColor="#ffffff" fgColor="#0a0e17" level="H" includeMargin={false} />
+                </div>
+                <div style={{ color: 'rgba(255,255,255,0.35)', fontSize: 8, letterSpacing: '0.15em', textAlign: 'center' }}>SCAN FOR FULL MEDICAL ID</div>
+                <div style={{ color: '#e11d48', fontSize: 7, letterSpacing: '0.2em', textAlign: 'center' }}>roadsos.app</div>
+              </div>
             </div>
-            
+
+            {/* Download button */}
+            <button
+              onClick={downloadWallpaper}
+              disabled={isDownloading}
+              className={`w-full py-3.5 rounded-xl font-bold text-sm transition-all duration-300 flex items-center justify-center gap-2 ${
+                isDownloading
+                  ? 'bg-white/10 text-gray-500 cursor-wait'
+                  : 'bg-gradient-to-r from-red-500 to-red-600 text-white hover:from-red-400 hover:to-red-500 active:scale-[0.98]'
+              }`}
+            >
+              {isDownloading ? (
+                <><span className="animate-spin text-base">⏳</span> Generating...</>
+              ) : (
+                <><span>📥</span> Save as Wallpaper (PNG)</>
+              )}
+            </button>
+
             <button
               onClick={() => window.open(qrUrl.toString(), '_blank')}
-              className="text-xs font-semibold text-teal-400 hover:text-teal-300 underline underline-offset-4"
+              className="text-[11px] text-teal-400 hover:text-teal-300 underline underline-offset-4"
             >
               Test QR Link
             </button>

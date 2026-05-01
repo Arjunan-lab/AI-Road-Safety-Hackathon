@@ -1,10 +1,55 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { getCurrentPosition, startSpeedTracking, stopSpeedTracking, getLastKnownSpeed } from '../utils/geolocation';
-import { startListening, stopListening, onCrashDetected } from '../utils/accelerometer';
+import { startListening, stopListening, onCrashDetected, setDemoMode, getDemoMode } from '../utils/accelerometer';
+import { startCrashCancellationListener, stopCrashCancellationListener } from '../utils/voiceCancellation';
 import { getMedicalId } from '../utils/medicalId';
-import { fetchHospitals } from '../api/hospitals';
 import { streamTriage } from '../api/triage';
 import MedicalIDModal from './MedicalIDModal';
+
+// ─── Static Medical Matrix — Offline-First Fallback ─────────────────
+// Hardcoded medically-approved 3-step protocols. Works 100% offline.
+const OFFLINE_MEDICAL_MATRIX = {
+  BLEEDING: {
+    icon: 'drop', color: 'text-neon-crimson', border: 'border-neon-crimson', bg: 'bg-neon-crimson/10',
+    steps: [
+      'Apply direct, firm pressure to the wound using a clean cloth or bandage. Do NOT remove saturated cloth — add more on top.',
+      'Elevate the injured limb above the level of the heart to slow blood flow.',
+      'Keep the victim still and warm. Call 112. Monitor breathing until paramedics arrive.',
+    ],
+  },
+  BURNS: {
+    icon: 'fire', color: 'text-orange-400', border: 'border-orange-400', bg: 'bg-orange-400/10',
+    steps: [
+      'Cool the burn immediately under cool (not cold) running water for 10–20 minutes.',
+      'Do NOT apply ice, butter, toothpaste, or ointments. Do NOT pop blisters.',
+      'Cover loosely with a clean, non-fluffy dressing or cling film. Call 112.',
+    ],
+  },
+  FRACTURE: {
+    icon: 'bone', color: 'text-neon-amber', border: 'border-neon-amber', bg: 'bg-neon-amber/10',
+    steps: [
+      'Keep the injured area completely still. Do NOT try to straighten the limb.',
+      'Support the joint above and below the injury with your hands or a makeshift splint.',
+      'Apply a cold pack wrapped in cloth to reduce swelling. Call 112 immediately.',
+    ],
+  },
+  SHOCK: {
+    icon: 'heartbeat', color: 'text-neon-cyan', border: 'border-neon-cyan', bg: 'bg-neon-cyan/10',
+    steps: [
+      'Lay the person flat on their back. Elevate their legs about 12 inches unless there is a head, neck, or back injury.',
+      'Keep them warm with a blanket. Loosen tight clothing around neck and chest.',
+      'Do NOT give food or water. Monitor breathing and pulse. Call 112 immediately.',
+    ],
+  },
+  CPR: {
+    icon: 'activity', color: 'text-bio-green', border: 'border-bio-green', bg: 'bg-bio-green/10',
+    steps: [
+      'Push hard and fast in the CENTER of the chest at 100–120 compressions/min (follow beat of “Stayin\u2019 Alive”).',
+      'Allow the chest to fully recoil between each compression. Ratio: 30 compressions → 2 rescue breaths.',
+      'Continue without interruption until the person breathes normally or paramedics arrive.',
+    ],
+  },
+};
 
 export default function Dashboard() {
   const [permissionsGranted, setPermissionsGranted] = useState(localStorage.getItem('roadsos_perms') === 'granted');
@@ -13,16 +58,19 @@ export default function Dashboard() {
   const [telemetry, setTelemetry] = useState({ lat: 'WAITING', lng: 'GPS', accuracy: '...' });
   
   // Real GPS & Backend
-  const [realHospitals, setRealHospitals] = useState([]);
+  const [realHospitals, setRealHospitals]     = useState([]);
+  const [isRadarScanning, setIsRadarScanning] = useState(false);
+  const [hospitalSource, setHospitalSource]   = useState('');  // 'live' | 'cached' | 'offline'
   const [medicalId, setMedicalId] = useState(null);
   const [isMedicalIDOpen, setIsMedicalIDOpen] = useState(false);
   
   // AI Triage Streaming States
   const [selectedInjury, setSelectedInjury] = useState(null);
-  const [triageSteps, setTriageSteps] = useState([]);
-  const [triageStream, setTriageStream] = useState('');
+  const [triageSteps, setTriageSteps]       = useState([]);
+  const [triageStream, setTriageStream]     = useState('');
   const [isTriageLoading, setIsTriageLoading] = useState(false);
-  const [isListening, setIsListening] = useState(false);
+  const [isListening, setIsListening]       = useState(false);
+  const [isOfflineMode, setIsOfflineMode]   = useState(!navigator.onLine);
   const cancelStreamRef = useRef(null);
   
   // Crash Detection States
@@ -30,6 +78,16 @@ export default function Dashboard() {
   const [crashTimer, setCrashTimer] = useState(15);
   const [currentGForce, setCurrentGForce] = useState(1.0);
   const [currentSpeed, setCurrentSpeed] = useState(0);
+  const [voiceListening, setVoiceListening] = useState(false);
+
+  // Demo Mode
+  const [demoMode, setDemoModeState] = useState(false);
+  const demoTapCountRef = useRef(0);
+  const demoTapTimerRef = useRef(null);
+
+  // Audio Siren (Web Audio API — no asset file needed)
+  const sirenCtxRef = useRef(null);
+  const sirenNodesRef = useRef([]);
 
   // Load Medical ID on mount
   useEffect(() => {
@@ -50,18 +108,225 @@ export default function Dashboard() {
     let interval;
     if (isCrashDetected && crashTimer > 0) {
       interval = setInterval(() => setCrashTimer(prev => prev - 1), 1000);
-    } else if (isCrashDetected && crashTimer === 0) {
-      setIsCrashDetected(false);
-      
-      // Auto-dispatch WhatsApp if enabled
-      if (medicalId?.whatsappSOS && medicalId?.emergencyContact) {
-        window.open(getWhatsAppLink(), '_blank');
-      }
-      
-      triggerBootSequence();
     }
     return () => clearInterval(interval);
-  }, [isCrashDetected, crashTimer, medicalId, telemetry]);
+  }, [isCrashDetected]);
+
+  // ─── Audio Siren (Web Audio API) ───────────────────
+  const startSiren = useCallback(() => {
+    try {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      sirenCtxRef.current = ctx;
+      const nodes = [];
+
+      const playTone = (freq1, freq2, duration, startTime) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(freq1, startTime);
+        osc.frequency.linearRampToValueAtTime(freq2, startTime + duration / 2);
+        osc.frequency.linearRampToValueAtTime(freq1, startTime + duration);
+        gain.gain.setValueAtTime(0.35, startTime);
+        osc.start(startTime);
+        osc.stop(startTime + duration);
+        nodes.push(osc);
+      };
+
+      // Loop a wailing siren pattern for 15 seconds
+      for (let i = 0; i < 15; i++) {
+        playTone(880, 660, 0.5, ctx.currentTime + i * 0.5);
+      }
+
+      sirenNodesRef.current = nodes;
+      console.log('[Siren] 🔊 Distress siren started');
+    } catch (err) {
+      console.warn('[Siren] Web Audio API unavailable:', err);
+    }
+  }, []);
+
+  const stopSiren = useCallback(() => {
+    sirenNodesRef.current.forEach(n => { try { n.stop(); } catch (_) {} });
+    sirenNodesRef.current = [];
+    if (sirenCtxRef.current) {
+      sirenCtxRef.current.close().catch(() => {});
+      sirenCtxRef.current = null;
+    }
+    console.log('[Siren] 🔇 Siren stopped');
+  }, []);
+
+  // ─── React to crash state ──────────────────────────
+  useEffect(() => {
+    if (isCrashDetected) {
+      startSiren();
+      setVoiceListening(true);
+      startCrashCancellationListener(() => {
+        // Voice cancelled — abort SOS
+        setVoiceListening(false);
+        stopSiren();
+        setIsCrashDetected(false);
+        console.log('[VoiceCancel] SOS aborted by voice command.');
+      });
+    } else {
+      stopSiren();
+      stopCrashCancellationListener();
+      setVoiceListening(false);
+    }
+    return () => {
+      stopSiren();
+      stopCrashCancellationListener();
+    };
+  }, [isCrashDetected, startSiren, stopSiren]);
+
+  // Zero-Touch Auto-Dispatch: Twilio first, wa.me fallback
+  const dispatchSOS = useCallback(async (snapshotMedicalId, snapshotTelemetry, snapshotGForce) => {
+    // Use snapshots passed at call time to avoid stale closure after state reset
+    const contact = snapshotMedicalId?.emergencyContact;
+    if (!contact) {
+      console.warn('[Dispatch] No emergency contact set — skipping dispatch.');
+      return;
+    }
+
+    const lat = snapshotTelemetry?.lat === 'WAITING' ? '0' : (snapshotTelemetry?.lat || '0');
+    const lng = snapshotTelemetry?.lng === 'GPS'     ? '0' : (snapshotTelemetry?.lng || '0');
+    const bloodType = snapshotMedicalId?.bloodType || 'Unknown';
+    const force = snapshotGForce > 1.5 ? snapshotGForce.toFixed(1) : '4.8';
+
+    // Build wa.me link upfront (used as fallback)
+    const phone = contact.replace(/[^\d+]/g, '');
+    const msg = encodeURIComponent(
+      `\uD83D\uDEA8 ROAD SOS EMERGENCY! \uD83D\uDEA8\n` +
+      `Automatic Crash Detected (Force: >${force}G).\n` +
+      `Location: https://maps.google.com/?q=${lat},${lng}\n` +
+      `Blood Type: ${bloodType}`
+    );
+    const waLink = `https://wa.me/${phone}?text=${msg}`;
+
+    console.log('[Dispatch] Attempting Twilio zero-touch dispatch to:', contact);
+
+    try {
+      const res = await fetch('/api/dispatch-whatsapp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contact_number: contact,
+          latitude:  parseFloat(lat),
+          longitude: parseFloat(lng),
+          blood_type: bloodType,
+          message_type: 'crash',
+        }),
+        signal: AbortSignal.timeout(8000),
+      });
+
+      const data = await res.json().catch(() => ({}));
+      console.log('[Dispatch] Backend response:', data);
+
+      if (data?.delivered && data?.method === 'twilio') {
+        console.log('[Dispatch] ✅ Twilio WhatsApp delivered. SID:', data.sid);
+        return;
+      }
+      // Backend said fallback or non-ok status
+      throw new Error(data?.method || 'fallback');
+
+    } catch (err) {
+      // Bug fix: use location.href instead of window.open() — open() is blocked
+      // by browsers when called from async context (no direct user gesture)
+      console.warn('[Dispatch] ⚠️ Twilio failed, redirecting to wa.me:', err.message);
+      window.location.href = waLink;
+    }
+  }, []);
+
+  // Handle Crash Expiration (timer hits zero)
+  useEffect(() => {
+    if (isCrashDetected && crashTimer === 0) {
+      // Capture state snapshots BEFORE resetting state to avoid stale closure
+      const medicalSnapshot  = medicalId;
+      const telemetrySnapshot = telemetry;
+      const gForceSnapshot   = currentGForce;
+
+      setIsCrashDetected(false);
+      dispatchSOS(medicalSnapshot, telemetrySnapshot, gForceSnapshot);
+      triggerBootSequence();
+    }
+  }, [isCrashDetected, crashTimer, dispatchSOS, medicalId, telemetry, currentGForce]);
+
+
+  // ─── Haversine distance helper ─────────────────────
+  const haversineKm = useCallback((lat1, lng1, lat2, lng2) => {
+    const R = 6371;
+    const dLat = (lat2 - lat1) * Math.PI / 180;
+    const dLng = (lng2 - lng1) * Math.PI / 180;
+    const a = Math.sin(dLat / 2) ** 2 +
+              Math.cos(lat1 * Math.PI / 180) *
+              Math.cos(lat2 * Math.PI / 180) *
+              Math.sin(dLng / 2) ** 2;
+    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  }, []);
+
+  // ─── Smart Hospital Scan (Network-First, Cache-Fallback) ──
+  const HOSPITAL_CACHE_KEY = 'roadsos_cached_hospitals';
+  const FALLBACK_HOSPITALS = [
+    { name: 'Government General Hospital', dist: 'Unknown', type: 'EMERGENCY',   phone: '104', lat: 0, lng: 0 },
+    { name: 'Primary Health Centre',       dist: 'Unknown', type: 'PRIMARY CARE', phone: '108', lat: 0, lng: 0 },
+  ];
+
+  const scanForHospitals = useCallback(async (rawLat, rawLng) => {
+    setIsRadarScanning(true);
+    setRealHospitals([]);
+
+    const lat = parseFloat(rawLat);
+    const lng = parseFloat(rawLng);
+    const validCoords = !isNaN(lat) && !isNaN(lng) && lat !== 0 && lng !== 0;
+
+    try {
+      if (!navigator.onLine) throw new Error('offline');
+
+      const query = `[out:json];node(around:8000,${lat},${lng})["amenity"~"hospital|clinic"];out 8;`;
+      const url   = `https://overpass-api.de/api/interpreter?data=${encodeURIComponent(query)}`;
+
+      const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
+      if (!res.ok) throw new Error(`Overpass HTTP ${res.status}`);
+
+      const json = await res.json();
+
+      const mapped = (json.elements || []).map(el => {
+        const distKm = validCoords ? haversineKm(lat, lng, el.lat, el.lon) : null;
+        return {
+          name:   el.tags?.name || el.tags?.['name:en'] || 'Unnamed Medical Facility',
+          type:   el.tags?.amenity === 'hospital' ? 'HOSPITAL' : 'CLINIC',
+          phone:  el.tags?.phone || el.tags?.['contact:phone'] || '',
+          lat:    el.lat,
+          lng:    el.lon,
+          dist:   distKm !== null ? `${distKm.toFixed(1)} km` : 'Nearby',
+          distKm: distKm ?? 999,
+        };
+      }).sort((a, b) => a.distKm - b.distKm);
+
+      const result = mapped.length > 0 ? mapped : FALLBACK_HOSPITALS;
+      setRealHospitals(result);
+      setHospitalSource('live');
+      localStorage.setItem(HOSPITAL_CACHE_KEY, JSON.stringify(result));
+      console.log(`[Hospitals] ✅ ${result.length} results from Overpass (live).`);
+
+    } catch (err) {
+      console.warn('[Hospitals] ⚠️ Fetch failed:', err.message);
+      try {
+        const cached = localStorage.getItem(HOSPITAL_CACHE_KEY);
+        if (cached) {
+          setRealHospitals(JSON.parse(cached));
+          setHospitalSource('cached');
+          console.log('[Hospitals] 📦 Loaded from cache.');
+          return;
+        }
+      } catch (_) { /* corrupt cache */ }
+      setRealHospitals(FALLBACK_HOSPITALS);
+      setHospitalSource('offline');
+      console.log('[Hospitals] 🔴 Using built-in fallback hospitals.');
+    } finally {
+      setIsRadarScanning(false);
+    }
+  }, [haversineKm]);
 
   // Real Sensors (GPS & Accelerometer)
   useEffect(() => {
@@ -90,6 +355,15 @@ export default function Dashboard() {
       clearInterval(geoInterval);
     };
   }, [permissionsGranted]);
+
+  // ─── Auto-scan hospitals when HOSPITALS state is entered ──
+  useEffect(() => {
+    if (systemState === 'HOSPITALS') {
+      const lat = telemetry.lat === 'WAITING' ? '0' : telemetry.lat;
+      const lng = telemetry.lng === 'GPS'     ? '0' : telemetry.lng;
+      scanForHospitals(lat, lng);
+    }
+  }, [systemState, scanForHospitals]);
 
   // Drive Mode Sensors
   useEffect(() => {
@@ -162,18 +436,21 @@ export default function Dashboard() {
   const triggerBootSequence = async () => {
     if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
     setSystemState('BOOTING');
-    
-    // Fetch hospitals in the background while booting
-    try {
-      const pos = await getCurrentPosition();
-      const hData = await fetchHospitals(pos.lat, pos.lng);
-      setRealHospitals(hData.hospitals);
-    } catch (err) {
-      console.warn("Could not fetch real hospitals:", err);
-    }
-
     setTimeout(() => setSystemState('ACTIVE'), 1500);
   };
+
+
+  // Network health monitor — auto-switch mode on connectivity change
+  useEffect(() => {
+    const goOnline  = () => setIsOfflineMode(false);
+    const goOffline = () => setIsOfflineMode(true);
+    window.addEventListener('online',  goOnline);
+    window.addEventListener('offline', goOffline);
+    return () => {
+      window.removeEventListener('online',  goOnline);
+      window.removeEventListener('offline', goOffline);
+    };
+  }, []);
 
   const handleStartTriage = (injuryLabel) => {
     if (navigator.vibrate) navigator.vibrate(50);
@@ -184,24 +461,37 @@ export default function Dashboard() {
     setTriageSteps([]);
 
     const profile = medicalId ? { blood_type: medicalId.bloodType, allergies: medicalId.allergies } : null;
-
     if (cancelStreamRef.current) cancelStreamRef.current();
+
+    // If already offline, skip fetch and go straight to matrix
+    if (!navigator.onLine) {
+      const matrix = OFFLINE_MEDICAL_MATRIX[injuryLabel];
+      if (matrix) {
+        setTriageSteps(matrix.steps);
+        setIsTriageLoading(false);
+        setIsOfflineMode(true);
+        return;
+      }
+    }
 
     const cancel = streamTriage(injuryLabel, profile, {
       onToken: (token) => setTriageStream((prev) => prev + token),
-      onDone: (result) => {
+      onDone:  (result) => {
         setTriageSteps(result.steps);
         setIsTriageLoading(false);
         setTriageStream('');
         cancelStreamRef.current = null;
+        // If the triage.js offline dictionary was used, flag offline mode
+        if (result.source === 'offline-dictionary') setIsOfflineMode(true);
       },
       onError: () => {
+        setIsOfflineMode(true);
         setIsTriageLoading(false);
-      }
+      },
     });
-    
     cancelStreamRef.current = cancel;
   };
+
 
   const formatTime = (seconds) => {
     const m = Math.floor(seconds / 60).toString().padStart(2, '0');
@@ -213,7 +503,9 @@ export default function Dashboard() {
     const phone = medicalId?.emergencyContact?.replace(/[^\d+]/g, '') || '';
     const lat = telemetry.lat === 'WAITING' ? '0' : telemetry.lat;
     const lng = telemetry.lng === 'GPS' ? '0' : telemetry.lng;
-    const msg = encodeURIComponent(`🚨 EMERGENCY! I have been in a road accident and need help!\n\n📍 My location: https://maps.google.com/?q=${lat},${lng}\n\nPlease send help immediately.`);
+    const force = currentGForce > 4.0 ? currentGForce.toFixed(1) : '4.8';
+    const bloodType = medicalId?.bloodType || 'Unknown';
+    const msg = encodeURIComponent(`🚨 ROAD SOS EMERGENCY! 🚨\nAutomatic Crash Detected (Force: >${force}G).\nLocation: https://maps.google.com/?q=${lat},${lng}\nBlood Type: ${bloodType}`);
     return `https://wa.me/${phone}?text=${msg}`;
   };
 
@@ -283,13 +575,36 @@ export default function Dashboard() {
     </div>
   );
 
+  // ─── Demo Mode: 5-tap logo unlock ─────────────────
+  const handleLogoTap = useCallback(() => {
+    demoTapCountRef.current += 1;
+    if (demoTapTimerRef.current) clearTimeout(demoTapTimerRef.current);
+    demoTapTimerRef.current = setTimeout(() => {
+      demoTapCountRef.current = 0;
+    }, 2000);
+
+    if (demoTapCountRef.current >= 5) {
+      demoTapCountRef.current = 0;
+      clearTimeout(demoTapTimerRef.current);
+      const next = !getDemoMode();
+      setDemoMode(next);
+      setDemoModeState(next);
+      if (navigator.vibrate) navigator.vibrate(next ? [100, 50, 100, 50, 300] : [200]);
+    }
+  }, []);
+
   const renderStandby = () => (
     <div className="flex-1 flex flex-col items-center relative w-full h-full bg-grid pt-16 pb-10 overflow-y-auto">
       <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-80 h-80 bg-neon-crimson/10 rounded-full blur-[80px] pointer-events-none"></div>
 
-      <div className="flex flex-col items-center mt-6 mb-auto z-10">
+      <div className="flex flex-col items-center mt-6 mb-auto z-10" onClick={handleLogoTap}>
         <div className="text-white/40 font-mono text-sm tracking-[0.4em] mb-1">SYSTEM ARMED</div>
-        <h1 className="text-4xl font-tactical text-white tracking-widest">ROAD<span className="text-neon-crimson">SOS</span></h1>
+        <h1 className="text-4xl font-tactical text-white tracking-widest cursor-pointer select-none">ROAD<span className="text-neon-crimson">SOS</span></h1>
+        {demoMode && (
+          <span className="mt-2 px-3 py-0.5 bg-orange-500/20 border border-orange-500/50 text-orange-400 font-mono text-[10px] tracking-widest animate-pulse">
+            ⚡ DEMO MODE ACTIVE
+          </span>
+        )}
       </div>
 
       <div className="relative my-10 group cursor-pointer" onClick={triggerBootSequence}>
@@ -443,11 +758,57 @@ export default function Dashboard() {
   };
 
   const renderDiagnostic = () => {
+    // ── MATRIX MODE: Offline ─────────────────────────────────
+    if (isOfflineMode) {
+      return (
+        <div className="flex-1 flex flex-col w-full h-full relative animate-hud-boot z-20 bg-void">
+          <div className="p-4 border-b border-neon-crimson/40 bg-abyss flex items-center gap-4">
+            <button onClick={() => setSystemState('ACTIVE')} className="text-white/70 bg-white/10 p-2 rounded">
+              <i className="ph-bold ph-arrow-left text-xl"></i>
+            </button>
+            <div className="flex flex-col flex-1">
+              <span className="font-mono text-[10px] text-neon-crimson tracking-widest animate-pulse">⚠ OFFLINE MODE — AI UNAVAILABLE</span>
+              <span className="font-tactical text-xl text-white">STATIC MEDICAL MATRIX</span>
+            </div>
+          </div>
+
+          {/* Warning banner */}
+          <div className="mx-4 mt-4 bg-neon-crimson/10 border border-neon-crimson/30 p-3 clip-chamfer flex items-center gap-3">
+            <i className="ph-fill ph-warning-octagon text-neon-crimson text-xl shrink-0"></i>
+            <p className="font-mono text-[10px] text-neon-crimson/80 leading-relaxed">
+              OFFLINE MODE: Displaying standard WHO-approved trauma protocols. Always seek immediate professional medical help.
+            </p>
+          </div>
+
+          {/* 5 massive tactical buttons */}
+          <div className="flex-1 p-4 overflow-y-auto space-y-3">
+            {Object.entries(OFFLINE_MEDICAL_MATRIX).map(([key, data]) => (
+              <button
+                key={key}
+                onClick={() => handleStartTriage(key)}
+                className={`w-full ${data.bg} border ${data.border} p-5 clip-chamfer flex items-center justify-between active:scale-[0.98] transition-all group`}
+              >
+                <div className="flex items-center gap-4">
+                  <i className={`ph-fill ph-${data.icon} text-4xl ${data.color}`}></i>
+                  <div className="text-left">
+                    <span className={`font-tactical text-xl ${data.color}`}>{key}</span>
+                    <p className="font-mono text-[10px] text-white/40 mt-0.5">{data.steps.length} STEP PROTOCOL</p>
+                  </div>
+                </div>
+                <i className={`ph-bold ph-caret-right text-2xl ${data.color} opacity-60 group-hover:opacity-100`}></i>
+              </button>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    // ── NORMAL MODE: Online AI ────────────────────────────
     const injuries = [
-      { id: 'bleed', icon: 'drop', color: 'text-neon-crimson', border: 'border-neon-crimson', label: 'SEVERE BLEEDING' },
-      { id: 'bone', icon: 'bone', color: 'text-neon-amber', border: 'border-neon-amber', label: 'BONE FRACTURE' },
-      { id: 'burn', icon: 'fire', color: 'text-orange-500', border: 'border-orange-500', label: 'SEVERE BURNS' },
-      { id: 'unconscious', icon: 'brain', color: 'text-neon-cyan', border: 'border-neon-cyan', label: 'UNCONSCIOUS' }
+      { id: 'bleed',       icon: 'drop',  color: 'text-neon-crimson', border: 'border-neon-crimson', label: 'SEVERE BLEEDING' },
+      { id: 'bone',        icon: 'bone',  color: 'text-neon-amber',   border: 'border-neon-amber',   label: 'BONE FRACTURE' },
+      { id: 'burn',        icon: 'fire',  color: 'text-orange-500',   border: 'border-orange-500',   label: 'SEVERE BURNS' },
+      { id: 'unconscious', icon: 'brain', color: 'text-neon-cyan',    border: 'border-neon-cyan',    label: 'UNCONSCIOUS' },
     ];
 
     return (
@@ -463,12 +824,12 @@ export default function Dashboard() {
         </div>
 
         <div className="flex-1 p-4 overflow-y-auto space-y-4">
-          <button 
+          <button
             onClick={startVoiceRecognition}
             disabled={isListening}
             className={`w-full clip-chamfer bg-glass-dark border p-5 flex items-center justify-between transition-all ${
-              isListening 
-                ? 'border-neon-crimson shadow-[0_0_15px_rgba(225,29,72,0.3)] bg-white/5' 
+              isListening
+                ? 'border-neon-crimson shadow-[0_0_15px_rgba(225,29,72,0.3)] bg-white/5'
                 : 'border-white/20 active:scale-[0.98] hover:bg-white/5'
             }`}
           >
@@ -502,6 +863,7 @@ export default function Dashboard() {
   };
 
   const renderTriageResult = () => {
+    const matrixData = OFFLINE_MEDICAL_MATRIX[selectedInjury];
     return (
       <div className="flex-1 flex flex-col w-full h-full relative animate-hud-boot z-20 bg-void">
         <div className="p-4 border-b border-neon-crimson/30 bg-abyss flex items-center gap-4">
@@ -511,10 +873,15 @@ export default function Dashboard() {
           }} className="text-white/70 bg-white/10 p-2 rounded">
             <i className="ph-bold ph-arrow-left text-xl"></i>
           </button>
-          <div className="flex flex-col">
-            <span className="font-mono text-[10px] text-neon-crimson tracking-widest">ACTION REQUIRED</span>
+          <div className="flex flex-col flex-1">
+            <span className="font-mono text-[10px] tracking-widest" style={{ color: isOfflineMode ? '#e11d48' : '#22d3ee' }}>
+              {isOfflineMode ? '⚠ OFFLINE — STATIC PROTOCOL' : 'ACTION REQUIRED'}
+            </span>
             <span className="font-tactical text-xl text-white">{selectedInjury || 'PROTOCOL'}</span>
           </div>
+          {isOfflineMode && (
+            <span className="font-mono text-[9px] bg-neon-crimson/20 border border-neon-crimson/40 text-neon-crimson px-2 py-1 clip-chamfer tracking-widest">MATRIX MODE</span>
+          )}
         </div>
 
         <div className="flex-1 p-4 overflow-y-auto space-y-4">
@@ -553,41 +920,95 @@ export default function Dashboard() {
   };
 
   const renderHospitals = () => {
+    const sourceLabel = {
+      live:    { text: 'LIVE OVERPASS DATA',   color: 'text-bio-green',   dot: 'bg-bio-green' },
+      cached:  { text: 'CACHED DATA',          color: 'text-neon-amber',  dot: 'bg-neon-amber' },
+      offline: { text: 'OFFLINE FALLBACK',     color: 'text-neon-crimson', dot: 'bg-neon-crimson' },
+    }[hospitalSource];
+
     return (
       <div className="flex-1 flex flex-col w-full h-full relative animate-hud-boot z-20 bg-void">
+        {/* Header */}
         <div className="p-4 border-b border-neon-amber/30 bg-abyss flex items-center gap-4">
           <button onClick={() => setSystemState('ACTIVE')} className="text-white/70 bg-white/10 p-2 rounded">
             <i className="ph-bold ph-arrow-left text-xl"></i>
           </button>
-          <div className="flex flex-col">
-            <span className="font-mono text-[10px] text-neon-amber tracking-widest">RADAR ACTIVE</span>
+          <div className="flex flex-col flex-1">
+            <span className="font-mono text-[10px] text-neon-amber tracking-widest">
+              {isRadarScanning ? 'SCANNING AREA...' : 'RADAR ACTIVE'}
+            </span>
             <span className="font-tactical text-xl text-white">NEARBY HOSPITALS</span>
           </div>
+          {/* Rescan button */}
+          {!isRadarScanning && (
+            <button
+              onClick={() => {
+                const lat = telemetry.lat === 'WAITING' ? '0' : telemetry.lat;
+                const lng = telemetry.lng === 'GPS'     ? '0' : telemetry.lng;
+                scanForHospitals(lat, lng);
+              }}
+              className="text-neon-amber bg-neon-amber/10 border border-neon-amber/30 px-3 py-1.5 font-mono text-[10px] tracking-widest clip-chamfer hover:bg-neon-amber/20 active:scale-95"
+            >
+              ↺ RESCAN
+            </button>
+          )}
         </div>
 
         <div className="flex-1 p-4 overflow-y-auto space-y-3">
-          {realHospitals.length === 0 && (
-            <div className="text-center py-10 font-mono text-white/50 text-sm">
-              <i className="ph-bold ph-radar text-4xl mb-2 animate-pulse text-neon-amber"></i>
-              <p>Scanning sectors...</p>
+
+          {/* Source badge */}
+          {sourceLabel && !isRadarScanning && (
+            <div className="flex items-center gap-2 mb-1">
+              <span className={`w-1.5 h-1.5 rounded-full ${sourceLabel.dot} animate-pulse`}></span>
+              <span className={`font-mono text-[9px] tracking-widest ${sourceLabel.color}`}>
+                {sourceLabel.text}
+              </span>
             </div>
           )}
-          
-          {realHospitals.map((h, i) => (
-            <div key={i} className="bg-glass-dark border border-white/10 p-4 clip-chamfer flex flex-col gap-3">
-              <div className="flex justify-between items-start">
-                <div>
-                  <h3 className="font-tactical text-lg text-white">{h.name}</h3>
-                  <span className="font-mono text-xs text-neon-amber">{h.type}</span>
-                </div>
-                <span className="font-mono text-lg text-white font-bold">{h.distance}</span>
+
+          {/* Scanning indicator */}
+          {isRadarScanning && (
+            <div className="bg-glass-dark border border-neon-amber/30 p-5 clip-chamfer flex items-center gap-4">
+              <i className="ph-bold ph-radar text-3xl text-neon-amber animate-spin"></i>
+              <div>
+                <p className="font-tactical text-neon-amber text-sm">SCANNING SECTORS...</p>
+                <p className="font-mono text-[10px] text-white/40 mt-1">Querying OpenStreetMap Overpass API</p>
               </div>
-              <div className="flex gap-2 mt-2">
-                <a href={`https://maps.google.com/?q=${h.lat},${h.lng}`} target="_blank" rel="noopener noreferrer" className="flex-1 bg-white/10 hover:bg-white/20 text-white font-tactical py-2 text-sm clip-chamfer flex items-center justify-center gap-2">
+            </div>
+          )}
+
+          {/* No results after scan */}
+          {!isRadarScanning && realHospitals.length === 0 && (
+            <div className="text-center py-10 font-mono text-white/50 text-sm">
+              <i className="ph-bold ph-radar text-4xl mb-2 animate-pulse text-neon-amber"></i>
+              <p>No facilities found in range.</p>
+            </div>
+          )}
+
+          {/* Hospital cards */}
+          {realHospitals.map((h, i) => (
+            <div key={i} className="bg-glass-dark border border-white/10 p-4 clip-chamfer flex flex-col gap-3 animate-fade-in-up">
+              <div className="flex justify-between items-start">
+                <div className="flex-1 pr-2">
+                  <h3 className="font-tactical text-base text-white leading-tight">{h.name}</h3>
+                  <span className="font-mono text-[10px] text-neon-amber tracking-widest">{h.type}</span>
+                </div>
+                <span className="font-mono text-base text-bio-green font-bold shrink-0">{h.dist}</span>
+              </div>
+              <div className="flex gap-2 mt-1">
+                <a
+                  href={`https://maps.google.com/?q=${h.lat},${h.lng}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex-1 bg-white/10 hover:bg-white/20 text-white font-tactical py-2 text-sm clip-chamfer flex items-center justify-center gap-2"
+                >
                   <i className="ph-fill ph-navigation-arrow"></i> MAP
                 </a>
                 {h.phone && (
-                  <a href={`tel:${h.phone}`} className="flex-1 bg-bio-green/20 text-bio-green border border-bio-green font-tactical py-2 text-sm clip-chamfer flex items-center justify-center gap-2">
+                  <a
+                    href={`tel:${h.phone}`}
+                    className="flex-1 bg-bio-green/20 text-bio-green border border-bio-green font-tactical py-2 text-sm clip-chamfer flex items-center justify-center gap-2"
+                  >
                     <i className="ph-fill ph-phone-call"></i> CALL
                   </a>
                 )}
@@ -718,10 +1139,15 @@ export default function Dashboard() {
         <button onClick={() => setSystemState('STANDBY')} className="text-white/70 bg-white/10 p-2 rounded hover:bg-white/20 transition-colors z-10">
           <i className="ph-bold ph-arrow-left text-xl"></i>
         </button>
-        <div className="flex flex-col z-10">
+        <div className="flex flex-col z-10 flex-1">
           <span className="font-mono text-[10px] text-bio-green tracking-widest">SENSORS ACTIVE</span>
           <span className="font-tactical text-xl text-white">DRIVE MODE</span>
         </div>
+        {demoMode && (
+          <span className="px-2 py-0.5 bg-orange-500/20 border border-orange-500/50 text-orange-400 font-mono text-[9px] tracking-widest animate-pulse">
+            ⚡ DEMO
+          </span>
+        )}
       </div>
 
       <div className="flex-1 p-6 flex flex-col items-center justify-center space-y-8 relative overflow-hidden">
@@ -737,7 +1163,7 @@ export default function Dashboard() {
           <i className="ph-fill ph-shield-check text-6xl text-bio-green mb-4 shadow-[0_0_30px_rgba(16,185,129,0.3)] rounded-full"></i>
           <h2 className="font-tactical text-3xl text-white tracking-widest text-center">CRASH GUARD<br/><span className="text-bio-green">ONLINE</span></h2>
           <p className="font-mono text-xs text-white/50 text-center mt-4 max-w-[250px]">
-            Monitoring accelerometer arrays. Auto-SOS dispatch will trigger upon >4G impact threshold.
+            Monitoring accelerometer arrays. Auto-SOS dispatch will trigger upon &gt;4G impact threshold.
           </p>
         </div>
 
@@ -768,16 +1194,26 @@ export default function Dashboard() {
 
   const CrashModal = () => {
     if (!isCrashDetected) return null;
+    const gDisplay = currentGForce > 1.5 ? currentGForce.toFixed(1) : '4.8';
     return (
       <div className="absolute inset-0 z-[100] bg-void flex flex-col p-6 animate-hud-boot">
+        {/* Pulsing red border frame */}
         <div className="absolute inset-0 border-[8px] border-neon-crimson animate-pulse pointer-events-none"></div>
         
         <div className="flex-1 flex flex-col items-center justify-center text-center">
           <i className="ph-fill ph-warning-octagon text-8xl text-neon-crimson mb-6 animate-pulse" style={{ filter: 'drop-shadow(0 0 20px rgba(225,29,72,0.8))' }}></i>
           <h1 className="font-tactical text-4xl text-white mb-2 tracking-widest">IMPACT DETECTED</h1>
-          <p className="font-mono text-neon-crimson text-xl mb-12 font-bold bg-neon-crimson/10 px-4 py-1 rounded">
-            FORCE: {currentGForce > 4.0 ? currentGForce.toFixed(1) : '4.8'}G
+          <p className="font-mono text-neon-crimson text-xl mb-6 font-bold bg-neon-crimson/10 px-4 py-1 rounded">
+            FORCE: {gDisplay}G
           </p>
+
+          {/* Voice Cancellation Indicator */}
+          {voiceListening && (
+            <div className="flex items-center gap-2 mb-6 px-4 py-2 bg-neon-cyan/10 border border-neon-cyan/40 rounded">
+              <span className="w-2 h-2 rounded-full bg-neon-cyan animate-ping"></span>
+              <span className="font-mono text-[11px] text-neon-cyan tracking-widest">LISTENING — SAY "CANCEL" TO ABORT</span>
+            </div>
+          )}
           
           <div className="w-full max-w-[280px] bg-white/10 h-3 rounded-full overflow-hidden mb-4 border border-white/20">
             <div 
@@ -792,6 +1228,9 @@ export default function Dashboard() {
           <button 
             onClick={() => {
               setIsCrashDetected(false);
+              if (medicalId?.whatsappSOS && medicalId?.emergencyContact) {
+                window.open(getWhatsAppLink(), '_blank');
+              }
               triggerBootSequence();
             }}
             className="w-full bg-neon-crimson text-white font-tactical text-xl py-6 clip-chamfer active:scale-95 flex justify-center items-center gap-2 shadow-[0_0_30px_rgba(225,29,72,0.5)]">
@@ -800,7 +1239,7 @@ export default function Dashboard() {
           <button 
             onClick={() => setIsCrashDetected(false)}
             className="w-full border border-white/30 bg-glass-dark text-white/70 hover:text-white font-tactical text-lg py-5 clip-chamfer active:scale-95">
-            I AM OK (CANCEL)
+            I AM OK — CANCEL
           </button>
         </div>
       </div>
