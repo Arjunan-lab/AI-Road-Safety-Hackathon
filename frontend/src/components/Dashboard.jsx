@@ -4,6 +4,7 @@ import { startListening, stopListening, onCrashDetected, setDemoMode, getDemoMod
 import { startCrashCancellationListener, stopCrashCancellationListener } from '../utils/voiceCancellation';
 import { getMedicalId } from '../utils/medicalId';
 import { streamTriage } from '../api/triage';
+import { fetchHospitals } from '../api/hospitals';
 import MedicalIDModal from './MedicalIDModal';
 
 // ─── Static Medical Matrix — Offline-First Fallback ─────────────────
@@ -294,24 +295,19 @@ export default function Dashboard() {
       if (!navigator.onLine) throw new Error('offline');
       if (!validCoords) throw new Error('invalid_coords');
 
-      const query = `[out:json];node(around:8000,${lat},${lng})["amenity"~"hospital|clinic"];out 8;`;
-      const url   = `https://overpass-api.de/api/interpreter?data=${encodeURIComponent(query)}`;
-
-      const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
-      if (!res.ok) throw new Error(`Overpass HTTP ${res.status}`);
-
-      const json = await res.json();
-
-      const mapped = (json.elements || []).map(el => {
-        const distKm = validCoords ? haversineKm(lat, lng, el.lat, el.lon) : null;
+      // Uses Render backend to bypass Overpass strict CORS/406 blocks
+      const data = await fetchHospitals(lat, lng, 10000);
+      
+      const mapped = (data.hospitals || []).map(el => {
+        const distKm = validCoords ? haversineKm(lat, lng, el.lat, el.lng) : null;
         return {
-          name:   el.tags?.name || el.tags?.['name:en'] || 'Unnamed Medical Facility',
-          type:   el.tags?.amenity === 'hospital' ? 'HOSPITAL' : 'CLINIC',
-          phone:  el.tags?.phone || el.tags?.['contact:phone'] || '',
+          name:   el.name || 'Unnamed Medical Facility',
+          type:   el.type ? el.type.toUpperCase() : 'HOSPITAL',
+          phone:  el.phone || '',
           lat:    el.lat,
-          lng:    el.lon,
-          dist:   distKm !== null ? `${distKm.toFixed(1)} km` : 'Nearby',
-          distKm: distKm ?? 999,
+          lng:    el.lng,
+          dist:   distKm !== null ? `${distKm.toFixed(1)} km` : (el.distance || 'Nearby'),
+          distKm: distKm !== null ? distKm : parseFloat(el.distance) || 999,
         };
       }).sort((a, b) => a.distKm - b.distKm);
 
@@ -319,7 +315,7 @@ export default function Dashboard() {
       setRealHospitals(result);
       setHospitalSource('live');
       localStorage.setItem(HOSPITAL_CACHE_KEY, JSON.stringify(result));
-      console.log(`[Hospitals] ✅ ${result.length} results from Overpass (live).`);
+      console.log(`[Hospitals] ✅ ${result.length} results from Render backend.`);
 
     } catch (err) {
       console.warn('[Hospitals] ⚠️ Fetch failed:', err.message);
