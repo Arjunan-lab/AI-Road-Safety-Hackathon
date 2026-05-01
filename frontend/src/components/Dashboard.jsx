@@ -275,12 +275,24 @@ export default function Dashboard() {
     setIsRadarScanning(true);
     setRealHospitals([]);
 
-    const lat = parseFloat(rawLat);
-    const lng = parseFloat(rawLng);
+    let lat = parseFloat(rawLat);
+    let lng = parseFloat(rawLng);
+
+    if (isNaN(lat) || isNaN(lng) || lat === 0 || lng === 0) {
+      try {
+        const pos = await getCurrentPosition();
+        lat = pos.lat;
+        lng = pos.lng;
+      } catch (err) {
+        console.warn('[Hospitals] Could not acquire direct GPS coordinates:', err);
+      }
+    }
+
     const validCoords = !isNaN(lat) && !isNaN(lng) && lat !== 0 && lng !== 0;
 
     try {
       if (!navigator.onLine) throw new Error('offline');
+      if (!validCoords) throw new Error('invalid_coords');
 
       const query = `[out:json];node(around:8000,${lat},${lng})["amenity"~"hospital|clinic"];out 8;`;
       const url   = `https://overpass-api.de/api/interpreter?data=${encodeURIComponent(query)}`;
