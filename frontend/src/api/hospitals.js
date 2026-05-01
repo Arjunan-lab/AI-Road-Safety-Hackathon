@@ -25,7 +25,7 @@ export async function fetchHospitals(lat, lng, radius = 10000) {
     });
 
     const response = await fetch(`${API_BASE}/hospitals?${params}`, {
-      signal: AbortSignal.timeout(4000), // 4s timeout — fail fast to fallback cache
+      signal: AbortSignal.timeout(20000), // 20s timeout to allow Render wake & Overpass execution
     });
 
     if (!response.ok) {

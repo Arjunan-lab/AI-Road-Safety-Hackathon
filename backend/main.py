@@ -319,7 +319,7 @@ async def _fetch_hospitals_overpass(lat: float, lng: float, radius: int = 10000)
     out center body;
     """
     headers = {"User-Agent": "RoadSoS_Vanguard/1.0 (emergency_hackathon_demo)"}
-    async with httpx.AsyncClient(timeout=5.0, headers=headers) as client:
+    async with httpx.AsyncClient(timeout=15.0, headers=headers) as client:
         resp = await client.post("https://overpass-api.de/api/interpreter", data={"data": query})
         resp.raise_for_status()
         data = resp.json()
