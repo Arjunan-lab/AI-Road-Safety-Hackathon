@@ -40,9 +40,9 @@ GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
 AI_TIMEOUT: int = int(os.getenv("AI_TIMEOUT", "15"))
 
 # Twilio — optional, gracefully absent = fallback to wa.me
-TWILIO_ACCOUNT_SID: str = os.getenv("TWILIO_ACCOUNT_SID", "")
-TWILIO_AUTH_TOKEN: str  = os.getenv("TWILIO_AUTH_TOKEN", "")
-TWILIO_FROM: str        = os.getenv("TWILIO_WHATSAPP_FROM", "whatsapp:+14155238886")
+TWILIO_ACCOUNT_SID: str = os.getenv("TWILIO_ACCOUNT_SID", "").strip()
+TWILIO_AUTH_TOKEN: str  = os.getenv("TWILIO_AUTH_TOKEN", "").strip()
+TWILIO_FROM: str        = os.getenv("TWILIO_WHATSAPP_FROM", "whatsapp:+14155238886").strip()
 
 _twilio_client = None
 if TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN:
