@@ -235,7 +235,7 @@ async def _stream_gemini_tokens(description: str, profile: Optional[dict] = None
         profile_block=_build_profile_block(profile),
     )
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:streamGenerateContent?alt=sse&key={GEMINI_API_KEY}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse&key={GEMINI_API_KEY}"
     
     payload = {
         "system_instruction": { "parts": [{"text": _SYSTEM_PROMPT}] },
